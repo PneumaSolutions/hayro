@@ -235,6 +235,16 @@ impl Type0Font {
 
         None
     }
+
+    /// Get the full text for a character code, including multi-char mappings (ligatures).
+    pub(crate) fn char_code_to_text(&self, code: u32) -> Option<String> {
+        if let Some(to_unicode) = &self.to_unicode
+            && let Some(text) = to_unicode.lookup_text(code)
+        {
+            return Some(text.to_string());
+        }
+        self.char_code_to_unicode(code).map(|c| c.to_string())
+    }
 }
 
 impl CacheKey for Type0Font {

@@ -8,6 +8,8 @@ const MAX_MAP_RANGE: u32 = (1 << 24) - 1; // 0xFFFFFF
 pub(crate) struct CMap {
     codespace_ranges: [Vec<u32>; 4],
     map: HashMap<u32, u32>,
+    /// Stores full text for multi-character mappings (ligatures, etc.)
+    text_map: HashMap<u32, String>,
     name: String,
     vertical: bool,
 }
@@ -17,27 +19,30 @@ impl CMap {
         Self {
             codespace_ranges: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             map: HashMap::new(),
+            text_map: HashMap::new(),
             name: String::new(),
             vertical: false,
         }
     }
 
     pub(crate) fn identity_h() -> Self {
-        let mut cmap = Self::new();
-
-        cmap.name = "Identity-H".to_string();
-        cmap.vertical = false;
-        cmap.add_codespace_range(2, 0, 0xFFFF);
-        cmap
+        Self {
+            codespace_ranges: [Vec::new(), vec![0, 0xFFFF], Vec::new(), Vec::new()],
+            map: HashMap::new(),
+            text_map: HashMap::new(),
+            name: "Identity-H".to_string(),
+            vertical: false,
+        }
     }
 
     pub(crate) fn identity_v() -> Self {
-        let mut cmap = Self::new();
-
-        cmap.name = "Identity-V".to_string();
-        cmap.vertical = true;
-        cmap.add_codespace_range(2, 0, 0xFFFF);
-        cmap
+        Self {
+            codespace_ranges: [Vec::new(), vec![0, 0xFFFF], Vec::new(), Vec::new()],
+            map: HashMap::new(),
+            text_map: HashMap::new(),
+            name: "Identity-V".to_string(),
+            vertical: true,
+        }
     }
 
     pub(crate) fn is_vertical(&self) -> bool {
@@ -56,6 +61,12 @@ impl CMap {
         } else {
             None
         }
+    }
+
+    /// Look up the full text for a code, including multi-character mappings (ligatures).
+    /// Returns None if no mapping exists, or Some(text) for mapped codes.
+    pub(crate) fn lookup_text(&self, code: u32) -> Option<&str> {
+        self.text_map.get(&code).map(|s| s.as_str())
     }
 
     fn add_codespace_range(&mut self, n: usize, low: u32, high: u32) {
@@ -98,7 +109,36 @@ impl CMap {
         Some(())
     }
 
-    fn map_bf_range_to_array(&mut self, low: u32, high: u32, array: Vec<u32>) -> Option<()> {
+    /// Map a range of codes to text values, incrementing the last character.
+    fn map_bf_range_text(&mut self, low: u32, high: u32, start_text: String) -> Option<()> {
+        if high.checked_sub(low)? > MAX_MAP_RANGE {
+            return None;
+        }
+
+        let mut current_low = low;
+        let mut chars: Vec<char> = start_text.chars().collect();
+
+        while current_low <= high {
+            let text: String = chars.iter().collect();
+            self.map_one_text(current_low, text);
+
+            // Increment the last character for the next iteration
+            if let Some(last) = chars.last_mut() {
+                *last = char::from_u32(*last as u32 + 1).unwrap_or(*last);
+            }
+            current_low += 1;
+        }
+
+        Some(())
+    }
+
+    /// Map a range of codes to an array of text strings.
+    fn map_bf_range_to_text_array(
+        &mut self,
+        low: u32,
+        high: u32,
+        array: Vec<String>,
+    ) -> Option<()> {
         if high.checked_sub(low)? > MAX_MAP_RANGE {
             return None;
         }
@@ -107,7 +147,7 @@ impl CMap {
         let mut i = 0;
 
         while current_low <= high && i < array.len() {
-            self.map.insert(current_low, array[i]);
+            self.map_one_text(current_low, array[i].clone());
             current_low += 1;
             i += 1;
         }
@@ -117,6 +157,15 @@ impl CMap {
 
     fn map_one(&mut self, src: u32, dst: u32) {
         self.map.insert(src, dst);
+    }
+
+    fn map_one_text(&mut self, src: u32, text: String) {
+        // Store first char in map for backwards compatibility
+        if let Some(first_char) = text.chars().next() {
+            self.map.insert(src, first_char as u32);
+        }
+        // Store full text for lookup_text()
+        self.text_map.insert(src, text);
     }
 
     pub(crate) fn read_code(&self, bytes: &[u8], offset: usize) -> (u32, usize) {
@@ -145,8 +194,24 @@ impl CMap {
     }
 }
 
-fn bf_string_char(str: &str) -> u32 {
-    str.chars().next().unwrap_or(0 as char) as u32
+/// Decode a byte sequence as UTF-16BE.
+/// PDF `ToUnicode` `CMap` hex strings are UTF-16BE encoded.
+fn decode_utf16be(bytes: &[u8]) -> String {
+    // Pad with leading zero if odd number of bytes (left-pad for big-endian)
+    let bytes = if bytes.len() % 2 == 1 {
+        let mut padded = vec![0_u8];
+        padded.extend_from_slice(bytes);
+        padded
+    } else {
+        bytes.to_vec()
+    };
+    let code_units: Vec<u16> = bytes
+        .chunks(2)
+        .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+        .collect();
+    char::decode_utf16(code_units)
+        .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect()
 }
 
 fn str_to_int(s: &str) -> u32 {
@@ -171,6 +236,14 @@ fn expect_string(obj: &Token) -> Option<String> {
             Some(result)
         }
         Token::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Get raw bytes from a hex string token (for BF mapping UTF-16BE decoding).
+fn expect_hex_bytes(obj: &Token) -> Option<&[u8]> {
+    match obj {
+        Token::HexString(bytes) => Some(bytes),
         _ => None,
     }
 }
@@ -402,19 +475,14 @@ fn parse_bf_char(cmap: &mut CMap, lexer: &mut CMapLexer<'_>) -> Option<()> {
                 let src_str = expect_string(token)?;
                 let src = str_to_int(&src_str);
                 let dst_obj = lexer.get_obj();
-                let dst_str = expect_string(&dst_obj)?;
-                // For beginbfchar, if the destination is a short hex string (like <0003>),
-                // it represents a Unicode code point, not a multi-byte string
-                if dst_str.chars().count() <= 2 {
-                    // Convert to Unicode code point
-                    let code_point = str_to_int(&dst_str);
-                    if let Some(unicode_char) = char::from_u32(code_point) {
-                        cmap.map_one(src, unicode_char as u32);
-                    } else {
-                        cmap.map_one(src, bf_string_char(&dst_str));
-                    }
-                } else {
-                    cmap.map_one(src, bf_string_char(&dst_str));
+
+                // For BF mappings, hex strings are UTF-16BE encoded
+                if let Some(bytes) = expect_hex_bytes(&dst_obj) {
+                    let text = decode_utf16be(bytes);
+                    cmap.map_one_text(src, text);
+                } else if let Some(dst_str) = expect_string(&dst_obj) {
+                    // Literal string - use as-is
+                    cmap.map_one_text(src, dst_str);
                 }
             }
         }
@@ -442,57 +510,42 @@ fn parse_bf_range(cmap: &mut CMap, lexer: &mut CMapLexer<'_>) -> Option<()> {
                     Token::Integer(dst_low) => {
                         cmap.map_bf_range(low, high, dst_low as u32)?;
                     }
-                    ref token => {
-                        if let Some(dst_str) = expect_string(token) {
-                            // For beginbfrange, if the destination is a short hex string (like <0003>),
-                            // it represents a Unicode code point, not a multi-byte string.
-                            if dst_str.chars().count() <= 2 {
-                                let code_point = str_to_int(&dst_str);
-                                if let Some(unicode_char) = char::from_u32(code_point) {
-                                    cmap.map_bf_range(low, high, unicode_char as u32)?;
-                                } else {
-                                    cmap.map_bf_range(low, high, bf_string_char(&dst_str))?;
-                                }
-                            } else {
-                                cmap.map_bf_range(low, high, bf_string_char(&dst_str))?;
-                            }
-                        } else if let Token::Command(cmd) = token {
-                            if cmd == "[" {
-                                let mut array = Vec::new();
-                                loop {
-                                    let array_obj = lexer.get_obj();
-                                    match array_obj {
-                                        Token::Command(cmd) if cmd == "]" => break,
-                                        Token::Eof => break,
-                                        Token::Integer(val) => array.push(val as u32),
-                                        ref arr_token => {
-                                            if let Some(val_str) = expect_string(arr_token) {
-                                                // For hex strings (like <2014>), properly
-                                                // convert to Unicode code point
-                                                if val_str.chars().count() <= 2 {
-                                                    let code_point = str_to_int(&val_str);
-                                                    if let Some(unicode_char) =
-                                                        char::from_u32(code_point)
-                                                    {
-                                                        array.push(unicode_char as u32);
-                                                    } else {
-                                                        array.push(bf_string_char(&val_str));
-                                                    }
-                                                } else {
-                                                    array.push(bf_string_char(&val_str));
-                                                }
-                                            }
-                                        }
+                    Token::HexString(ref bytes) => {
+                        // UTF-16BE encoded destination
+                        let text = decode_utf16be(bytes);
+                        cmap.map_bf_range_text(low, high, text)?;
+                    }
+                    Token::String(ref s) => {
+                        // Literal string
+                        cmap.map_bf_range_text(low, high, s.clone())?;
+                    }
+                    Token::Command(ref cmd) if cmd == "[" => {
+                        // Array of destinations
+                        let mut array = Vec::new();
+                        loop {
+                            let array_obj = lexer.get_obj();
+                            match array_obj {
+                                Token::Command(cmd) if cmd == "]" => break,
+                                Token::Eof => break,
+                                Token::Integer(val) => {
+                                    // Integer becomes single char
+                                    if let Some(c) = char::from_u32(val as u32) {
+                                        array.push(c.to_string());
                                     }
                                 }
-                                cmap.map_bf_range_to_array(low, high, array)?;
-                            } else {
-                                return None;
+                                Token::HexString(ref bytes) => {
+                                    // UTF-16BE encoded
+                                    array.push(decode_utf16be(bytes));
+                                }
+                                Token::String(ref s) => {
+                                    array.push(s.clone());
+                                }
+                                _ => {}
                             }
-                        } else {
-                            return None;
                         }
+                        cmap.map_bf_range_to_text_array(low, high, array)?;
                     }
+                    _ => return None,
                 }
             }
         }
@@ -865,5 +918,56 @@ end"#
         assert_eq!(cmap.lookup_code(0xFF), Some(255));
         assert_eq!(cmap.lookup_code(0x100), None);
         assert_eq!(cmap.name, "Identity-H");
+    }
+
+    #[test]
+    fn test_parse_beginbfchar_ligature() {
+        // "ti" ligature: <019F> maps to U+0074 U+0069 ("ti")
+        let input = r#"1 beginbfchar
+<019F> <00740069>
+endbfchar"#
+            .to_string();
+
+        let cmap = parse_cmap(&input).unwrap();
+
+        // lookup_code returns first char for backwards compatibility
+        assert_eq!(cmap.lookup_code(0x019F), Some('t' as u32));
+        // lookup_text returns full string
+        assert_eq!(cmap.lookup_text(0x019F), Some("ti"));
+    }
+
+    #[test]
+    fn test_parse_beginbfrange_with_ligature_array() {
+        // Array with ligatures
+        let input = r#"1 beginbfrange
+<01A0> <01A1> [<00660069> <00660066>]
+endbfrange"#
+            .to_string();
+
+        let cmap = parse_cmap(&input).unwrap();
+
+        // First code maps to "fi"
+        assert_eq!(cmap.lookup_code(0x01A0), Some('f' as u32));
+        assert_eq!(cmap.lookup_text(0x01A0), Some("fi"));
+        // Second code maps to "ff"
+        assert_eq!(cmap.lookup_code(0x01A1), Some('f' as u32));
+        assert_eq!(cmap.lookup_text(0x01A1), Some("ff"));
+    }
+
+    #[test]
+    fn test_parse_emoji_surrogate_pair() {
+        // Emoji: U+1F600 (grinning face) encoded as UTF-16BE surrogate pair
+        // U+1F600 = 0xD83D 0xDE00 in UTF-16
+        let input = r#"1 beginbfchar
+<01> <D83DDE00>
+endbfchar"#
+            .to_string();
+
+        let cmap = parse_cmap(&input).unwrap();
+
+        // lookup_text should return the emoji
+        assert_eq!(cmap.lookup_text(0x01), Some("\u{1F600}"));
+        // lookup_code returns first char (the emoji itself, not surrogate)
+        assert_eq!(cmap.lookup_code(0x01), Some(0x1F600));
     }
 }

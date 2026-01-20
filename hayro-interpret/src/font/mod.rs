@@ -97,6 +97,20 @@ impl Glyph<'_> {
             Glyph::Type3(g) => g.as_unicode(),
         }
     }
+
+    /// Returns the text representation for this glyph, including multi-character
+    /// mappings like ligatures (e.g., "fi", "ti").
+    ///
+    /// This is similar to [`Glyph::as_unicode`] but returns a `String` to handle
+    /// cases where a single glyph maps to multiple Unicode characters.
+    ///
+    /// Returns `None` if the text value could not be determined.
+    pub fn as_text(&self) -> Option<String> {
+        match self {
+            Glyph::Outline(g) => g.as_text(),
+            Glyph::Type3(g) => g.as_text(),
+        }
+    }
 }
 
 /// An identifier that uniquely identifies a glyph, for caching purposes.
@@ -143,6 +157,14 @@ impl OutlineGlyph {
     /// See [`Glyph::as_unicode`] for details on the fallback chain used.
     pub fn as_unicode(&self) -> Option<char> {
         self.font.char_code_to_unicode(self.char_code)
+    }
+
+    /// Returns the text representation for this glyph, including multi-character
+    /// mappings like ligatures.
+    ///
+    /// See [`Glyph::as_text`] for details.
+    pub fn as_text(&self) -> Option<String> {
+        self.font.char_code_to_text(self.char_code)
     }
 
     /// Get raw font bytes and metadata for downstream use.
@@ -206,6 +228,14 @@ impl<'a> Type3Glyph<'a> {
     /// Note: Type3 fonts can only provide Unicode via `ToUnicode` `CMap`.
     pub fn as_unicode(&self) -> Option<char> {
         self.font.char_code_to_unicode(self.char_code)
+    }
+
+    /// Returns the text representation for this glyph, including multi-character
+    /// mappings like ligatures.
+    ///
+    /// See [`Glyph::as_text`] for details.
+    pub fn as_text(&self) -> Option<String> {
+        self.font.char_code_to_text(self.char_code)
     }
 }
 
