@@ -95,15 +95,15 @@ impl Type1Font {
         }
     }
 
-    pub(crate) fn char_code_to_unicode(&self, char_code: u32) -> Option<String> {
+    pub(crate) fn char_code_to_unicode(&self, char_code: u32) -> Option<char> {
         if let Some(to_unicode) = &self.2
             && let Some(unicode) = to_unicode.lookup_code(char_code)
         {
             // Skip null character mappings and fall back to glyph name
             // lookup. Some PDFs have incorrect ToUnicode mappings that map
             // to U+0000.
-            if unicode != "\0" {
-                return Some(unicode);
+            if unicode != 0 {
+                return char::from_u32(unicode);
             }
         }
 
@@ -227,10 +227,8 @@ impl StandardKind {
         })
     }
 
-    fn char_code_to_unicode(&self, code: u8) -> Option<String> {
-        self.code_to_ps_name(code)
-            .and_then(glyph_name_to_unicode)
-            .map(|c| c.to_string())
+    fn char_code_to_unicode(&self, code: u8) -> Option<char> {
+        self.code_to_ps_name(code).and_then(glyph_name_to_unicode)
     }
 }
 
@@ -308,7 +306,7 @@ impl Type1Kind {
         self.widths.get(code as usize).copied()
     }
 
-    fn char_code_to_unicode(&self, code: u8) -> Option<String> {
+    fn char_code_to_unicode(&self, code: u8) -> Option<char> {
         let glyph_name = if let Some(entry) = self.encodings.get(&code) {
             Some(entry.as_str())
         } else {
@@ -318,9 +316,7 @@ impl Type1Kind {
             }
         };
 
-        glyph_name
-            .and_then(glyph_name_to_unicode)
-            .map(|c| c.to_string())
+        glyph_name.and_then(glyph_name_to_unicode)
     }
 }
 
@@ -377,7 +373,7 @@ impl CffKind {
         self.widths.get(code as usize).copied()
     }
 
-    fn char_code_to_unicode(&self, code: u8) -> Option<String> {
+    fn char_code_to_unicode(&self, code: u8) -> Option<char> {
         let glyph_name = if let Some(entry) = self.encodings.get(&code) {
             Some(entry.as_str())
         } else {
@@ -388,8 +384,6 @@ impl CffKind {
             }
         };
 
-        glyph_name
-            .and_then(glyph_name_to_unicode)
-            .map(|c| c.to_string())
+        glyph_name.and_then(glyph_name_to_unicode)
     }
 }
