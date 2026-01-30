@@ -114,6 +114,18 @@ impl Type1Font {
             Kind::Type1(t) => t.char_code_to_unicode(code),
         }
     }
+
+    /// Get the full text for a character code, including multi-char mappings (ligatures).
+    pub(crate) fn char_code_to_text(&self, char_code: u32) -> Option<String> {
+        if let Some(to_unicode) = &self.2
+            && let Some(text) = to_unicode.lookup_text(char_code)
+            && !text.is_empty()
+            && text != "\0"
+        {
+            return Some(text.to_string());
+        }
+        self.char_code_to_unicode(char_code).map(|c| c.to_string())
+    }
 }
 
 impl CacheKey for Type1Font {

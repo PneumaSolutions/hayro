@@ -138,6 +138,15 @@ impl OutlineFont {
         }
     }
 
+    /// Get the full text for a character code, including multi-char mappings (ligatures).
+    pub(crate) fn char_code_to_text(&self, char_code: u32) -> Option<String> {
+        match self {
+            Self::Type1(t) => t.char_code_to_text(char_code),
+            Self::TrueType(t) => t.char_code_to_text(char_code),
+            Self::Type0(t) => t.char_code_to_text(char_code),
+        }
+    }
+
     /// Get the advance width for a glyph by character code.
     pub(crate) fn glyph_advance_width(&self, char_code: u32) -> Option<f32> {
         match self {
